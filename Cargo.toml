@@ -1,0 +1,19 @@
+[package]
+name = "subwash"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+once_cell = "1.21.4"
+reqwest = "0.13.4"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_yaml = "0.9.34"
+surge-ping = "0.9.0"
+tokio = { version = "1.52.3", features = [
+  "macros",
+  "rt-multi-thread",
+  "time",
+  "net",
+] }
+url = "2.5.8"
+wang = { git = "https://github.com/JQiue/wang", branch = "dev" }
