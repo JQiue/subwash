@@ -228,7 +228,7 @@ pub async fn get_subscription() -> Result<String, Box<dyn std::error::Error>> {
       },
     },
     ProxyGroup {
-      name: "Gemini".to_string(),
+      name: "LLM".to_string(),
       r#type: "select".to_string(),
       proxies: subscriptions
         .iter()
