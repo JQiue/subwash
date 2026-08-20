@@ -238,7 +238,7 @@ rules:
   - DOMAIN-SUFFIX,bing.com,DIRECT
   - DOMAIN-SUFFIX,jinqiu.wang,DIRECT
   - DOMAIN-SUFFIX,is.me,DIRECT
-  - DOMAIN-SUFFIX,gemini.google.com,Gemini
+  - DOMAIN-SUFFIX,gemini.google.com,LLM
   - DOMAIN-SUFFIX,www.python.org,节点选择
   - RULE-SET,tld-not-cn,节点选择
   - RULE-SET,gfw,节点选择
