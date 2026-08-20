@@ -100,6 +100,21 @@ struct ProxyGroup {
   other_fields: BTreeMap<String, Value>,
 }
 
+/// 订阅响应头 `subscription-userinfo` 解析结果（字节 / Unix 秒）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SubscriptionTraffic {
+  upload: Option<u64>,
+  download: Option<u64>,
+  total: Option<u64>,
+  expire: Option<i64>,
+}
+
+struct FetchResult {
+  name: String,
+  nodes: Vec<ProxyNode>,
+  traffic: Option<SubscriptionTraffic>,
+}
+
 /// 解析监听地址：`SUBWASH_LISTEN` > `config.yaml` 的 `config.listen` > 默认。
 pub fn resolve_listen_addr() -> String {
   if let Ok(addr) = std::env::var("SUBWASH_LISTEN") {
@@ -144,9 +159,20 @@ pub async fn get_subscription() -> Result<String, Box<dyn std::error::Error + Se
   }
 
   let mut all_nodes = Vec::new();
+  // 供「订阅信息」展示组；按订阅名索引，组装时再按 config 顺序输出
+  let mut traffic_by_name: HashMap<String, SubscriptionTraffic> = HashMap::new();
   for handle in fetch_handles {
     match handle.await {
-      Ok(nodes) => all_nodes.extend(nodes),
+      Ok(FetchResult {
+        name,
+        nodes,
+        traffic,
+      }) => {
+        if let Some(t) = traffic {
+          traffic_by_name.insert(name, t);
+        }
+        all_nodes.extend(nodes);
+      }
       Err(e) => eprintln!("拉取订阅任务异常: {}", e),
     }
   }
@@ -338,6 +364,28 @@ pub async fn get_subscription() -> Result<String, Box<dyn std::error::Error + Se
     other_fields: BTreeMap::new(),
   });
 
+  // 订阅信息：仅展示用 reject 节点，不进 url-test / fallback / 节点选择
+  let mut info_nodes = Vec::new();
+  let mut info_names = Vec::new();
+  for sub in &subscriptions {
+    let Some(traffic) = traffic_by_name.get(&sub.name) else {
+      continue;
+    };
+    let name = format_traffic_label(&sub.name, traffic);
+    println!("机场 [{}] 流量: {}", sub.name, name);
+    info_names.push(name.clone());
+    info_nodes.push(info_display_node(name));
+  }
+  if !info_names.is_empty() {
+    // 独立 select：只给人看，不挂到节点选择 / 自动选择 / 故障转移
+    proxy_groups.push(ProxyGroup {
+      name: "订阅信息".to_string(),
+      r#type: "select".to_string(),
+      proxies: info_names,
+      other_fields: BTreeMap::new(),
+    });
+  }
+
   for sub in &alive_subs {
     let proxies: Vec<String> = all_nodes
       .iter()
@@ -364,7 +412,9 @@ pub async fn get_subscription() -> Result<String, Box<dyn std::error::Error + Se
     eprintln!("解析 template.yaml 失败: {}", e);
     e
   })?;
-  my_subscritption.proxies = all_nodes;
+  let mut proxies_out = all_nodes;
+  proxies_out.extend(info_nodes);
+  my_subscritption.proxies = proxies_out;
   my_subscritption.proxy_groups = proxy_groups;
   let text = serde_yaml::to_string(&my_subscritption).map_err(|e| {
     eprintln!("序列化 Clash 配置失败: {}", e);
@@ -725,7 +775,13 @@ fn name_has_region_code(name: &str, code: &str) -> bool {
     .any(|token| token.eq_ignore_ascii_case(&code))
 }
 
-async fn fetch_and_decode_sub(sub: &Subscription) -> Vec<ProxyNode> {
+async fn fetch_and_decode_sub(sub: &Subscription) -> FetchResult {
+  let empty = || FetchResult {
+    name: sub.name.clone(),
+    nodes: Vec::new(),
+    traffic: None,
+  };
+
   let client = reqwest::Client::new();
   let resp = match client
     .get(sub.url.clone())
@@ -736,20 +792,30 @@ async fn fetch_and_decode_sub(sub: &Subscription) -> Vec<ProxyNode> {
     Ok(resp) => resp,
     Err(e) => {
       eprintln!("机场 [{}] 拉取失败: {}", sub.name, e);
-      return Vec::new();
+      return empty();
     }
   };
 
   if !resp.status().is_success() {
     eprintln!("机场 [{}] HTTP 状态异常: {}", sub.name, resp.status());
-    return Vec::new();
+    return empty();
   }
+
+  let traffic = resp
+    .headers()
+    .get("subscription-userinfo")
+    .and_then(|v| v.to_str().ok())
+    .and_then(parse_subscription_userinfo);
 
   let text = match resp.text().await {
     Ok(text) => text,
     Err(e) => {
       eprintln!("机场 [{}] 读取响应失败: {}", sub.name, e);
-      return Vec::new();
+      return FetchResult {
+        name: sub.name.clone(),
+        nodes: Vec::new(),
+        traffic,
+      };
     }
   };
 
@@ -757,7 +823,11 @@ async fn fetch_and_decode_sub(sub: &Subscription) -> Vec<ProxyNode> {
     Ok(nodes) => nodes,
     Err(e) => {
       eprintln!("机场 [{}] 解析 YAML 失败: {}", sub.name, e);
-      return Vec::new();
+      return FetchResult {
+        name: sub.name.clone(),
+        nodes: Vec::new(),
+        traffic,
+      };
     }
   };
 
@@ -774,7 +844,130 @@ async fn fetch_and_decode_sub(sub: &Subscription) -> Vec<ProxyNode> {
     println!("机场 [{}] 拉取到 {} 个节点", sub.name, result_nodes.len());
   }
 
-  result_nodes
+  FetchResult {
+    name: sub.name.clone(),
+    nodes: result_nodes,
+    traffic,
+  }
+}
+
+/// 解析 `upload=; download=; total=; expire=`（分号分隔，空白可有可无）。
+fn parse_subscription_userinfo(raw: &str) -> Option<SubscriptionTraffic> {
+  let mut traffic = SubscriptionTraffic::default();
+  let mut any = false;
+
+  for part in raw.split(';') {
+    let part = part.trim();
+    if part.is_empty() {
+      continue;
+    }
+    let Some((key, value)) = part.split_once('=') else {
+      continue;
+    };
+    let key = key.trim();
+    let value = value.trim();
+    match key {
+      "upload" => {
+        if let Ok(v) = value.parse::<u64>() {
+          traffic.upload = Some(v);
+          any = true;
+        }
+      }
+      "download" => {
+        if let Ok(v) = value.parse::<u64>() {
+          traffic.download = Some(v);
+          any = true;
+        }
+      }
+      "total" => {
+        if let Ok(v) = value.parse::<u64>() {
+          traffic.total = Some(v);
+          any = true;
+        }
+      }
+      "expire" => {
+        if let Ok(v) = value.parse::<i64>() {
+          traffic.expire = Some(v);
+          any = true;
+        }
+      }
+      _ => {}
+    }
+  }
+
+  any.then_some(traffic)
+}
+
+fn format_bytes_gib(bytes: u64) -> String {
+  const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+  format!("{:.2}GB", bytes as f64 / GIB)
+}
+
+fn format_expire(ts: i64) -> String {
+  // 避免引入 chrono：按 UTC 粗格式化 YYYY-MM-DD
+  if ts <= 0 {
+    return "永久".to_string();
+  }
+  // days from Unix epoch
+  let days = ts.div_euclid(86_400);
+  // civil_from_days (Howard Hinnant) — UTC 日期
+  let z = days + 719_468;
+  let era = z.div_euclid(146_097);
+  let doe = (z - era * 146_097) as u64;
+  let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+  let y = yoe as i64 + era * 400;
+  let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  let mp = (5 * doy + 2) / 153;
+  let d = doy - (153 * mp + 2) / 5 + 1;
+  let m = if mp < 10 { mp + 3 } else { mp - 9 };
+  let y = if m <= 2 { y + 1 } else { y };
+  format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+fn format_traffic_label(airport: &str, t: &SubscriptionTraffic) -> String {
+  let used = t
+    .upload
+    .unwrap_or(0)
+    .saturating_add(t.download.unwrap_or(0));
+  let usage = match t.total {
+    Some(total) if total > 0 => {
+      let pct = (used as f64 / total as f64 * 100.0).clamp(0.0, 999.0);
+      format!(
+        "{}/{} ({:.0}%)",
+        format_bytes_gib(used),
+        format_bytes_gib(total),
+        pct
+      )
+    }
+    Some(_) => format!("{}/?", format_bytes_gib(used)),
+    None => {
+      if t.upload.is_some() || t.download.is_some() {
+        format!("{} used", format_bytes_gib(used))
+      } else {
+        "流量未知".to_string()
+      }
+    }
+  };
+
+  match t.expire {
+    Some(ts) => format!("{airport} | {usage} | 到期 {}", format_expire(ts)),
+    None => format!("{airport} | {usage}"),
+  }
+}
+
+/// 展示用占位节点。仅出现在「订阅信息」select 中，不进测速/自动组。
+/// 用本地 socks5 占位：多数内核不接受 proxies 里写 type=reject。
+fn info_display_node(name: String) -> ProxyNode {
+  ProxyNode {
+    name,
+    r#type: "socks5".to_string(),
+    server: "127.0.0.1".to_string(),
+    port: 1,
+    source_tier: SubscriptionTier::Backup,
+    group_name: "订阅信息".to_string(),
+    latency: None,
+    other_fields: BTreeMap::new(),
+  }
 }
 
 async fn test_speed(proxy_nodes: &mut Vec<ProxyNode>, latency: u64) {
@@ -969,6 +1162,27 @@ mod tests {
       .count();
     assert_eq!(hk, 1);
     assert_eq!(selected.len(), 3); // 只有 3 个地区
+  }
+
+  #[test]
+  fn parse_subscription_userinfo_basic() {
+    let t = parse_subscription_userinfo(
+      "upload=1073741824; download=2147483648; total=10737418240; expire=1893456000",
+    )
+    .expect("should parse");
+    assert_eq!(t.upload, Some(1073741824));
+    assert_eq!(t.download, Some(2147483648));
+    assert_eq!(t.total, Some(10737418240));
+    assert_eq!(t.expire, Some(1893456000));
+    assert_eq!(format_expire(1893456000), "2030-01-01");
+
+    let label = format_traffic_label("provider-a", &t);
+    assert!(label.contains("provider-a"));
+    assert!(label.contains("到期"));
+    assert!(label.contains('%'));
+
+    assert!(parse_subscription_userinfo("").is_none());
+    assert!(parse_subscription_userinfo("foo=bar").is_none());
   }
 
   #[test]
