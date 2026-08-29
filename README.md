@@ -38,6 +38,14 @@ cargo run
 GET http://127.0.0.1:5000/subscribe
 ```
 
+强制立即刷新并返回最新配置：
+
+```text
+GET http://127.0.0.1:5000/subscribe/refresh
+```
+
+刷新失败返回 HTTP 500；普通 `/subscribe` 仍优先使用缓存。
+
 监听地址优先级：`SUBWASH_LISTEN` > `config.listen` > `127.0.0.1:5000`
 
 ```powershell

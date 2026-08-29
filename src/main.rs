@@ -55,28 +55,35 @@ impl Cache {
   }
 }
 
-fn refresh_subscription(cache: &Arc<Mutex<Cache>>, refresh_lock: &Arc<Mutex<()>>, reason: &str) {
+fn refresh_subscription(
+  cache: &Arc<Mutex<Cache>>,
+  refresh_lock: &Arc<Mutex<()>>,
+  reason: &str,
+) -> bool {
   let _guard = match refresh_lock.lock() {
     Ok(g) => g,
     Err(e) => {
       eprintln!("刷新锁异常: {}", e);
-      return;
+      return false;
     }
   };
 
   println!("刷新订阅 [{}] ...", reason);
   match TOKIO_RT.handle().block_on(get_subscription()) {
-    Ok(body) => {
-      match cache.lock() {
-        Ok(mut guard) => {
-          guard.set(body);
-          println!("刷新订阅 [{}] 成功，已写入缓存", reason);
-        }
-        Err(e) => eprintln!("刷新订阅 [{}] 成功但写缓存失败: {}", reason, e),
+    Ok(body) => match cache.lock() {
+      Ok(mut guard) => {
+        guard.set(body);
+        println!("刷新订阅 [{}] 成功，已写入缓存", reason);
+        true
       }
-    }
+      Err(e) => {
+        eprintln!("刷新订阅 [{}] 成功但写缓存失败: {}", reason, e);
+        false
+      }
+    },
     Err(e) => {
       eprintln!("刷新订阅 [{}] 失败，保留旧缓存: {}", reason, e);
+      false
     }
   }
 }
@@ -116,9 +123,28 @@ fn main() {
 
   println!("subscribe: http://{}/subscribe", listen);
 
+  let cache_refresh = Arc::clone(&cache);
+  let lock_refresh = Arc::clone(&refresh_lock);
   let cache_http = Arc::clone(&cache);
   let lock_http = Arc::clone(&refresh_lock);
   App::new()
+    .get("/subscribe/refresh", move |_req| {
+      if !refresh_subscription(&cache_refresh, &lock_refresh, "manual") {
+        return (500u16, "failed to refresh subscription").into_response();
+      }
+
+      match cache_refresh.lock() {
+        Ok(guard) => guard
+          .data
+          .clone()
+          .map(IntoResponse::into_response)
+          .unwrap_or_else(|| (500u16, "subscription cache is empty").into_response()),
+        Err(e) => {
+          eprintln!("缓存锁异常: {}", e);
+          (500u16, "failed to read subscription cache").into_response()
+        }
+      }
+    })
     .get("/subscribe", move |_req| {
       let cached = {
         match cache_http.lock() {
