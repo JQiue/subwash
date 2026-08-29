@@ -45,6 +45,8 @@ struct Config {
   max_per_region: Option<usize>,
   /// HTTP 监听地址，默认 `127.0.0.1:5000`；可被环境变量 `SUBWASH_LISTEN` 覆盖。
   listen: Option<String>,
+  /// 后台定时刷新间隔（秒）。默认 600；`0` 表示关闭定时任务，仅按请求拉取。
+  refresh_interval: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,6 +137,17 @@ pub fn resolve_listen_addr() -> String {
   }
 
   "127.0.0.1:5000".to_string()
+}
+
+/// 后台刷新间隔（秒）：`config.refresh_interval`，缺省 600；`0` 表示关闭定时刷新。
+pub fn resolve_refresh_interval() -> u64 {
+  if let Ok(content) = std::fs::read_to_string("config.yaml")
+    && let Ok(cfg) = serde_yaml::from_str::<AppConfig>(&content)
+    && let Some(secs) = cfg.config.refresh_interval
+  {
+    return secs;
+  }
+  600
 }
 
 pub async fn get_subscription() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {

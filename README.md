@@ -16,7 +16,7 @@
 - 默认 `region_diverse`（按地区保底），可选 `latency_top`
 - 节点名统一为 `{机场}-{地区}`（冲突加 `-2`、`-3`…）
 - 只覆盖模板的 `proxies` / `proxy-groups`，DNS 和 rules 不动
-- 成功结果缓存 600s；失败返回 500 且不缓存
+- 后台按 `refresh_interval` 定时抓取并更新内存缓存；失败保留上次成功结果
 
 ## 依赖文件
 
@@ -44,7 +44,7 @@ GET http://127.0.0.1:5000/subscribe
 $env:SUBWASH_LISTEN="0.0.0.0:5000"; cargo run
 ```
 
-改配置或代码后重启进程，或等缓存过期。
+改配置或代码后重启进程。开启定时刷新时，缓存由后台成功刷新覆盖。
 
 ## 配置
 
@@ -61,6 +61,7 @@ config:
   min_per_region: 1             # 仅 region_diverse
   max_per_region: 2             # 仅 region_diverse；不写 = 不限制
   listen: "127.0.0.1:5000"      # 可被 SUBWASH_LISTEN 覆盖
+  refresh_interval: 600         # 后台定时刷新（秒）；启动先抓一次；0 = 关闭
 
 subscriptions:
   - name: provider-a            # 策略组名 + 节点名前缀
@@ -77,14 +78,15 @@ subscriptions:
 
 ### `config`
 
-| 字段              | 默认值           | 说明                 |
-| ----------------- | ---------------- | -------------------- |
-| `speed_test`      | 必填             | ICMP 超时（ms）      |
-| `exclude_keyword` | —                | 匹配节点**原名**     |
-| `select_mode`     | `region_diverse` | 见下；可被订阅项覆盖 |
-| `min_per_region`  | `1`              | 仅 `region_diverse`  |
-| `max_per_region`  | 不限制           | 仅 `region_diverse`  |
-| `listen`          | `127.0.0.1:5000` | HTTP 监听地址        |
+| 字段               | 默认值           | 说明                                                                        |
+| ------------------ | ---------------- | --------------------------------------------------------------------------- |
+| `speed_test`       | 必填             | ICMP 超时（ms）                                                             |
+| `exclude_keyword`  | —                | 匹配节点**原名**                                                            |
+| `select_mode`      | `region_diverse` | 见下；可被订阅项覆盖                                                        |
+| `min_per_region`   | `1`              | 仅 `region_diverse`                                                         |
+| `max_per_region`   | 不限制           | 仅 `region_diverse`                                                         |
+| `listen`           | `127.0.0.1:5000` | HTTP 监听地址                                                               |
+| `refresh_interval` | `600`            | 后台定时刷新间隔（秒）。启动先抓一次；`0` 关闭定时，仅按请求拉取并缓存 600s |
 
 ### `select_mode`
 
